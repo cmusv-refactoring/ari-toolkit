@@ -1,0 +1,256 @@
+buildscript {
+    repositories {
+        mavenCentral()
+        jcenter()
+    }
+}
+
+plugins {
+    id 'com.github.ben-manes.versions' version '0.11.3'
+    id 'org.openrewrite.rewrite' version '6.27.1'
+}
+
+apply plugin: 'java'
+apply plugin: 'maven'
+
+ext {
+    junitVersion = '4.11'
+    artifactsDir = "$projectDir/artifacts"
+    artifactGroupId = 'au.com.ausregistry'
+    gradleWrapperVersion = '2.7'
+    pagesProjectDir = "$projectDir/../ari-toolkit-gitpages"
+    checkstyleConfDirPath = "$projectDir/checkstyle/"
+
+    commonsCodecVersion          = '1.10'
+    simpleFrameworkVersion       = '4.1.21'
+    httpClientVersion            = '4.5.1'
+    hamcrestVersion              = '1.3'
+    ariMockHttpServerVersion     = '1.0.2'
+}
+
+version = toolkitVersion
+
+repositories {
+    mavenCentral()
+    flatDir name:'ExternalJars', dirs: 'lib'
+}
+
+sourceSets {
+    test {
+        java.srcDir('src/test/unit/java')
+        resources.srcDir('src/test/unit/resources')
+    }
+    componentTest {
+        java.srcDir('src/test/component/java')
+        resources.srcDir('src/test/component/resources')
+    }
+    integrationTest {
+        java.srcDir('src/test/integration/java')
+        resources.srcDir('src/test/integration/resources')
+    }
+}
+
+dependencies {
+    compile("commons-codec:commons-codec:$commonsCodecVersion") {
+        exclude group: 'junit', module: 'junit'
+    }
+
+    compile "org.apache.httpcomponents:httpclient:$httpClientVersion"
+
+    testCompile "org.hamcrest:hamcrest-all:$hamcrestVersion"
+    testCompile "org.simpleframework:simple:$simpleFrameworkVersion"
+    testCompile "org.mockito:mockito-core:1.10.19"
+    testCompile("org.powermock:powermock-api-mockito:1.6.3") {
+        exclude module: 'junit'
+    }
+    testCompile("org.powermock:powermock-module-junit4:1.6.3") {
+        exclude module: 'junit'
+    }
+
+    testCompile ("junit:junit-dep:$junitVersion") {
+        exclude group: 'org.hamcrest', module: 'hamcrest-core' // exclude hamcrest-core 1.3
+    }
+
+    integrationTestCompile sourceSets.main.output
+    integrationTestCompile configurations.testCompile
+
+    componentTestCompile sourceSets.main.output
+    componentTestCompile configurations.testCompile
+    componentTestCompile "ari-mock-http-server:ari-mock-http-server:$ariMockHttpServerVersion"
+}
+
+tasks.withType(JavaCompile) {
+    sourceCompatibility = '1.6'
+    targetCompatibility = '1.6'
+
+    options.encoding = "UTF-8"
+    options.compilerArgs << "-Xlint:-options"
+}
+
+tasks.withType(Test) {
+    jvmArgs '-Dfile.encoding=UTF8'
+}
+
+task cleanArtifacts(type: Delete) {
+    delete artifactsDir
+}
+
+test {
+    outputs.upToDateWhen { false }
+    exclude '**/PerfTest.class'
+    exclude '**/SessionTest.class'
+    exclude '**/SessionManagerTest.class'
+}
+
+javadoc {
+    destinationDir = file("$artifactsDir/javadoc")
+}
+
+clean.dependsOn cleanArtifacts
+
+test.dependsOn jar
+
+task integrationTest(type: Test) {
+    testClassesDirs = sourceSets.integrationTest.output.classesDirs
+    reports.junitXml.outputLocation.set(file("build/test-results/integration"))
+    classpath += sourceSets.integrationTest.runtimeClasspath
+}
+
+task componentTest(type: Test) {
+    onlyIf { 
+        isJava7Compatible()
+    }
+
+    testClassesDirs = sourceSets.componentTest.output.classesDirs
+    reports.junitXml.outputLocation.set(file("build/test-results/component"))
+    classpath += sourceSets.componentTest.runtimeClasspath
+}
+
+// jar manifest configuration
+
+jar {
+    manifest {
+        attributes(
+            'Specification-Title': 'ari java toolkit',
+            'Specification-Version': "${version}",
+            'Implementation-Version': "${version}"
+        )
+    }
+}
+
+task sourcesJar(type: Jar, dependsOn: classes) {
+    classifier = 'sources'
+    from sourceSets.main.allSource
+}
+
+task javadocJar(type: Jar, dependsOn: javadoc) {
+    classifier = 'javadoc'
+    from javadoc.destinationDir
+}
+
+task checkVersionNumbersInReadme {
+    doLast {
+        def readme = file("readme.md")
+        def looksLikeVersionNumber = ~/\d+\.\d+\.\d+/
+        def textNeedFixedVersion = 'Since version 3.7.6 the toolkit no longer support Java SE 6.'
+
+        def versionNumbersInReadmeFile = readme.readLines()
+            .findAll { line ->
+                !line.startsWith(textNeedFixedVersion)
+            }
+            .collectMany { line ->
+                looksLikeVersionNumber.matcher(line).collect { match ->
+                    (toolkitVersion == match) ? null : match
+                }.findResults{ x -> x }
+            }
+
+        def decommissionJava6LineWithFixedVersion = readme.readLines().find { line ->
+            line.startsWith(textNeedFixedVersion)
+        }
+
+        assert versionNumbersInReadmeFile.isEmpty()
+        assert decommissionJava6LineWithFixedVersion != null
+    }
+}
+
+artifacts {
+    archives sourcesJar
+    archives javadocJar
+}
+
+uploadArchives {
+    uploadDescriptor = false
+    repositories {
+        flatDir {
+            dirs artifactsDir
+        }
+        if (System.properties.keySet().containsAll('repoUrl', 'repoUsername', 'repoPassword')) {
+            mavenDeployer {
+                repository(url: System.properties['repoUrl']) {
+                    authentication(userName: System.properties['repoUsername'], password: System.properties['repoPassword'])
+                }
+                pom.groupId = artifactGroupId
+                pom.artifactId = rootProject.name
+                pom.version = toolkitVersion
+            }
+        } else {
+            mavenDeployer {
+                repository(url: "file://$pagesProjectDir/repo")
+                pom.groupId = artifactGroupId
+                pom.artifactId = rootProject.name
+                pom.version = toolkitVersion
+            }
+        }
+    }
+}
+
+uploadArchives.doLast {
+    if (!System.properties.keySet().containsAll('repoUrl', 'repoUsername', 'repoPassword')) {
+        copy {
+            from(javadoc.destinationDir)
+            into "$pagesProjectDir/javadoc/ari-toolkit"
+        }
+    }
+}
+
+uploadArchives.dependsOn checkVersionNumbersInReadme, javadoc
+
+integrationTest.shouldRunAfter test
+componentTest.shouldRunAfter integrationTest
+
+apply plugin: 'checkstyle'
+
+checkstyle {
+    configFile = file(checkstyleConfDirPath + 'checkstyle.xml')
+    configProperties = [checkstyleConfigDir: checkstyleConfDirPath]
+    toolVersion = "6.19"
+}
+
+tasks.withType(Checkstyle) {
+    onlyIf {
+        isJava7Compatible()
+    }
+
+    classpath = project.sourceSets.main.output
+    classpath += configurations.compile
+    classpath += configurations.testCompile
+    classpath += configurations.integrationTestCompile
+}
+
+check.dependsOn test
+check.dependsOn integrationTest
+check.dependsOn componentTest
+
+boolean isJava7Compatible() {
+    JavaVersion.current().java7Compatible
+}
+
+tasks.withType(Test) {
+    jvmArgs '-Duser.language=en', '-Duser.country=US'
+}
+
+rewrite {
+    //activeRecipe 'org.example.UpdateExtVersions'
+    setExportDatatables(true)
+    configFile = file('rewrite.yml')
+}
